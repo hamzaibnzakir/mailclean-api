@@ -1,19 +1,10 @@
-import re
 import dns.resolver
 import smtplib
 import socket
 import random
 import string
-import pandas as pd
 from email_validator import validate_email, EmailNotValidError
-from concurrent.futures import ThreadPoolExecutor
 from config import SMTP_TIMEOUT, FROM_EMAIL, RETRY_COUNT
-
-ROLE_BASED_PREFIXES = [
-    "admin", "support", "info", "contact", "sales",
-    "help", "billing", "team", "noreply", "no-reply",
-    "hello", "mail", "office", "abuse", "postmaster",
-]
 
 
 class EmailVerifier:
@@ -37,9 +28,6 @@ class EmailVerifier:
     def get_domain(self, email):
         return email.split("@")[1].lower()
 
-    def get_username(self, email):
-        return email.split("@")[0].lower()
-
     def check_mx_records(self, domain):
         try:
             mx_records = dns.resolver.resolve(domain, "MX")
@@ -51,9 +39,6 @@ class EmailVerifier:
     def is_disposable(self, domain):
         return domain in self.disposable_domains
 
-    def is_role_based(self, username):
-        return username in ROLE_BASED_PREFIXES
-
     def smtp_verify(self, email, mx_record):
         for attempt in range(RETRY_COUNT):
             try:
@@ -63,11 +48,10 @@ class EmailVerifier:
                 server.mail(FROM_EMAIL)
                 code, message = server.rcpt(email)
                 server.quit()
-
                 if code == 250:
-                    return True, "Mailbox exists"
+                    return True, "Mailbox confirmed"
                 elif code in [450, 451, 452]:
-                    return None, "Greylisted or temporary issue"
+                    return None, "Greylisted"
                 else:
                     return False, f"SMTP rejected: {code}"
             except socket.timeout:
@@ -76,33 +60,36 @@ class EmailVerifier:
             except Exception as e:
                 if attempt == RETRY_COUNT - 1:
                     return None, str(e)
-        return None, "Verification failed after retries"
+        return None, "Verification failed"
 
     def detect_catch_all(self, domain, mx_record):
         fake_user = "".join(random.choices(string.ascii_lowercase, k=14))
-        fake_email = f"{fake_user}@{domain}"
-        result, _ = self.smtp_verify(fake_email, mx_record)
+        result, _ = self.smtp_verify(f"{fake_user}@{domain}", mx_record)
         return result is True
 
-    def calculate_risk(self, valid_format, has_mx, smtp_valid, disposable, catch_all, role_based):
-        score = 100
+    def classify(self, valid_format, has_mx, smtp_valid, disposable, catch_all):
+        """
+        Three buckets — purely based on whether the email will deliver.
+        Role-based is irrelevant for store owner outreach.
+
+        delivers — send these. SMTP confirmed OR timeout with real domain.
+        unknown  — catch-all domain. Server accepts everything so we cant confirm.
+        bounce   — hard signals. Do not send.
+        """
         if not valid_format:
-            score -= 60
+            return "bounce", "HIGH"
         if not has_mx:
-            score -= 40
+            return "bounce", "HIGH"
         if smtp_valid is False:
-            score -= 50
+            return "bounce", "HIGH"
         if disposable:
-            score -= 20
+            return "bounce", "HIGH"
         if catch_all:
-            score -= 15
-        if role_based:
-            score -= 10
-        if score >= 85:
-            return "LOW"
-        elif score >= 60:
-            return "MEDIUM"
-        return "HIGH"
+            return "unknown", "MEDIUM"
+        if smtp_valid is True:
+            return "delivers", "LOW"
+        # smtp_valid is None = timeout — server blocked probe but domain is real
+        return "delivers", "LOW"
 
     def verify(self, email: str) -> dict:
         email = email.strip().lower()
@@ -113,24 +100,23 @@ class EmailVerifier:
             "smtp_valid": None,
             "catch_all": False,
             "disposable": False,
-            "role_based": False,
             "risk": "HIGH",
+            "category": "bounce",
+            "sendable": False,
             "message": "",
         }
 
         if not self.validate_format(email):
-            result["message"] = "Invalid format"
+            result["message"] = "Invalid email format"
             return result
         result["format_valid"] = True
 
         domain = self.get_domain(email)
-        username = self.get_username(email)
         result["disposable"] = self.is_disposable(domain)
-        result["role_based"] = self.is_role_based(username)
 
         mx_valid, mx_record = self.check_mx_records(domain)
         if not mx_valid:
-            result["message"] = "No MX records found"
+            result["message"] = "No MX records — domain does not accept email"
             return result
         result["mx_valid"] = True
 
@@ -143,13 +129,16 @@ class EmailVerifier:
         except Exception:
             pass
 
-        result["risk"] = self.calculate_risk(
+        category, risk = self.classify(
             result["format_valid"],
             result["mx_valid"],
             result["smtp_valid"],
             result["disposable"],
             result["catch_all"],
-            result["role_based"],
         )
+
+        result["risk"] = risk
+        result["category"] = category
+        result["sendable"] = category != "bounce"
 
         return result
