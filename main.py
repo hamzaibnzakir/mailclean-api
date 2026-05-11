@@ -121,14 +121,12 @@ async def export_results(job_id: str, category: str = "all"):
 
     df = pd.DataFrame(job["results"])
 
-    if category == "valid":
-        df = df[(df["smtp_valid"] == True) & (df["risk"] == "LOW")]
-    elif category == "invalid":
-        df = df[df["smtp_valid"] == False]
-    elif category == "risky":
-        df = df[df["risk"] != "LOW"]
-    elif category == "catchall":
-        df = df[df["catch_all"] == True]
+    if category == "delivers":
+        df = df[df["category"] == "delivers"]
+    elif category == "unknown":
+        df = df[df["category"] == "unknown"]
+    elif category == "bounce":
+        df = df[df["category"] == "bounce"]
 
     output = io.StringIO()
     df.to_csv(output, index=False)
