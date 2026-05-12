@@ -43,8 +43,8 @@ class EmailVerifier:
         for attempt in range(RETRY_COUNT):
             try:
                 server = smtplib.SMTP(timeout=SMTP_TIMEOUT)
-                server.connect(mx_record, 25)
-                server.ehlo("api.brainboxecomlab.com")
+                server.connect(mx_record)
+                server.helo("localhost")
                 server.mail(FROM_EMAIL)
                 code, message = server.rcpt(email)
                 server.quit()
