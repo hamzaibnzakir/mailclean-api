@@ -51,9 +51,15 @@ class EmailVerifier:
                 if code == 250:
                     return True, "Mailbox confirmed"
                 elif code in [450, 451, 452]:
-                    return None, "Greylisted"
+                    return None, f"Greylisted or temp issue ({code})"
+                elif code in [550, 551, 552, 553, 554]:
+                    return False, f"Mailbox does not exist ({code})"
+                elif code == 521:
+                    return False, f"Domain does not accept mail ({code})"
+                elif code == 525:
+                    return False, f"User account disabled ({code})"
                 else:
-                    return False, f"SMTP rejected: {code}"
+                    return False, f"SMTP rejected ({code})"
             except socket.timeout:
                 if attempt == RETRY_COUNT - 1:
                     return None, "SMTP timeout"
@@ -76,6 +82,7 @@ class EmailVerifier:
         unknown  — catch-all domain. Server accepts everything so we cant confirm.
         bounce   — hard signals. Do not send.
         """
+        # Hard bounce signals
         if not valid_format:
             return "bounce", "HIGH"
         if not has_mx:
@@ -84,12 +91,40 @@ class EmailVerifier:
             return "bounce", "HIGH"
         if disposable:
             return "bounce", "HIGH"
+        # Catch-all — cannot confirm individual mailbox
         if catch_all:
             return "unknown", "MEDIUM"
+        # SMTP confirmed
         if smtp_valid is True:
             return "delivers", "LOW"
-        # smtp_valid is None = timeout — server blocked probe but domain is real
+        # Timeout — server blocked probe but domain + MX are real
+        # Treat as deliverable for cold email
         return "delivers", "LOW"
+
+    def check_domain_exists(self, domain):
+        """Extra signal — check if domain has ANY DNS record at all"""
+        import dns.resolver
+        try:
+            dns.resolver.resolve(domain, "A")
+            return True
+        except Exception:
+            pass
+        try:
+            dns.resolver.resolve(domain, "AAAA")
+            return True
+        except Exception:
+            pass
+        return False
+
+    def check_smtp_error_code(self, code):
+        """Classify SMTP error codes precisely"""
+        hard_bounce = [550, 551, 552, 553, 554, 555, 500, 501, 503, 521, 525]
+        soft_bounce = [421, 450, 451, 452]
+        if code in hard_bounce:
+            return "hard"
+        if code in soft_bounce:
+            return "soft"
+        return "unknown"
 
     def verify(self, email: str) -> dict:
         email = email.strip().lower()
@@ -113,6 +148,11 @@ class EmailVerifier:
 
         domain = self.get_domain(email)
         result["disposable"] = self.is_disposable(domain)
+
+        # Extra signal — check domain exists at all before MX lookup
+        if not self.check_domain_exists(domain):
+            result["message"] = "Domain does not exist"
+            return result
 
         mx_valid, mx_record = self.check_mx_records(domain)
         if not mx_valid:

@@ -31,7 +31,14 @@ class SingleEmailRequest(BaseModel):
 
 @app.post("/verify/single")
 async def verify_single(payload: SingleEmailRequest):
-    return verifier.verify(payload.email)
+    import re
+    raw = payload.email.strip()
+    # If multiple emails are joined by : ; | split and verify all
+    parts = re.split(r"[;:|]+", raw)
+    parts = [p.strip().lower() for p in parts if "@" in p.strip() and "." in p.strip().split("@")[-1]]
+    if len(parts) > 1:
+        return {"multiple": True, "results": [verifier.verify(e) for e in parts]}
+    return verifier.verify(raw)
 
 
 @app.post("/verify/bulk")
@@ -41,9 +48,27 @@ async def verify_bulk(background_tasks: BackgroundTasks, file: UploadFile = File
     contents = await file.read()
     try:
         df = pd.read_csv(io.BytesIO(contents))
-        emails = df.iloc[:, 0].dropna().tolist()
+        raw = df.iloc[:, 0].dropna().tolist()
     except Exception:
         raise HTTPException(status_code=400, detail="Could not parse CSV.")
+
+    # Auto-split emails joined by : ; | space or comma within a single cell
+    emails = []
+    for entry in raw:
+        entry = str(entry).strip()
+        # Split on common separators that are not part of an email
+        import re
+        parts = re.split(r"[;:|\s]+", entry)
+        for part in parts:
+            part = part.strip().lower()
+            # Basic check — must contain @ and a dot after @
+            if "@" in part and "." in part.split("@")[-1]:
+                emails.append(part)
+
+    # Deduplicate while preserving order
+    seen = set()
+    emails = [e for e in emails if not (e in seen or seen.add(e))]
+
     if len(emails) == 0:
         raise HTTPException(status_code=400, detail="No emails found in CSV")
     if len(emails) > 50000:
