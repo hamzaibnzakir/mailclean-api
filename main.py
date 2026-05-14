@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header
+from routes_dashboard import router as dashboard_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
@@ -31,6 +32,7 @@ app.add_middleware(
 
 verifier = EmailVerifier()
 jobs = {}
+app.include_router(dashboard_router)
 
 
 @app.on_event("startup")
@@ -235,8 +237,10 @@ def run_bulk_job(job_id: str, emails: list, user_id: str):
             jobs[job_id]["results"] = results
     jobs[job_id]["status"] = "done"
     jobs[job_id]["completed_at"] = time.time()
-    # Update user email count
     users_col.update_one({"_id": ObjectId(user_id)}, {"$inc": {"emails_verified": len(emails)}})
+    from auth import db
+    user_doc = users_col.find_one({"_id": ObjectId(user_id)})
+    db["verify_logs"].insert_one({"user_id": user_id, "user_name": user_doc.get("name","") if user_doc else "", "user_email": user_doc.get("email","") if user_doc else "", "email_count": len(emails), "sent_at": datetime.utcnow()})
 
 
 @app.get("/results/{job_id}")
