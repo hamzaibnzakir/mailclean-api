@@ -284,6 +284,42 @@ async def export_results(job_id: str, category: str = "all", user=Depends(requir
     )
 
 
+# ─── Scout logging ───────────────────────────────────────────────────────────
+
+class ScoutLogRequest(BaseModel):
+    batch_number: int
+    email_count: int
+    subject: str
+    total_batches: int
+
+@app.post("/scout/log")
+async def log_scout(payload: ScoutLogRequest, user=Depends(require_approved)):
+    from auth import db
+    db["scout_logs"].insert_one({
+        "user_id": str(user["_id"]),
+        "user_name": user["name"],
+        "user_email": user["email"],
+        "batch_number": payload.batch_number,
+        "email_count": payload.email_count,
+        "subject": payload.subject,
+        "total_batches": payload.total_batches,
+        "sent_at": datetime.utcnow(),
+    })
+    # Update user scout count
+    users_col.update_one({"_id": user["_id"]}, {"": {"batches_sent": 1, "emails_scouted": payload.email_count}})
+    return {"message": "Logged"}
+
+
+@app.get("/admin/scout-logs")
+async def get_scout_logs(admin=Depends(require_admin)):
+    from auth import db
+    logs = list(db["scout_logs"].find({}, {"_id": 0}).sort("sent_at", -1).limit(200))
+    for l in logs:
+        if l.get("sent_at"):
+            l["sent_at"] = l["sent_at"].isoformat()
+    return logs
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
