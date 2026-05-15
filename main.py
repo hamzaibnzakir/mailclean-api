@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header, Request
 from routes_dashboard import router as dashboard_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -310,7 +310,8 @@ async def log_scout(payload: ScoutLogRequest, user=Depends(require_approved)):
         "sent_at": datetime.utcnow(),
     })
     # Update user scout count
-    users_col.update_one({"_id": user["_id"]}, {"": {"batches_sent": 1, "emails_scouted": payload.email_count}})
+    inc_op = {"$inc": {"batches_sent": 1, "emails_scouted": payload.email_count}}
+    users_col.update_one({"_id": user["_id"]}, inc_op)
     return {"message": "Logged"}
 
 
@@ -322,6 +323,75 @@ async def get_scout_logs(admin=Depends(require_admin)):
         if l.get("sent_at"):
             l["sent_at"] = l["sent_at"].isoformat()
     return logs
+
+
+# ─── Email open tracking ──────────────────────────────────────────────────────
+
+@app.get("/track/open/{track_id}")
+async def track_open(track_id: str, request: Request):
+    from auth import db
+    from fastapi import Request
+    db["open_events"].insert_one({
+        "track_id": track_id,
+        "opened_at": datetime.utcnow(),
+        "ip": request.client.host if request.client else "unknown",
+    })
+    db["batch_tracks"].update_one(
+        {"track_id": track_id},
+        {"$inc": {"open_count": 1}, "$set": {"last_opened": datetime.utcnow()}},
+    )
+    # Return 1x1 transparent GIF
+    import base64
+    gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    from fastapi.responses import Response
+    return Response(content=gif, media_type="image/gif", headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    })
+
+
+@app.post("/scout/create-track")
+async def create_track(payload: dict, user=Depends(require_approved)):
+    from auth import db
+    import secrets
+    track_id = secrets.token_urlsafe(16)
+    db["batch_tracks"].insert_one({
+        "track_id": track_id,
+        "user_id": str(user["_id"]),
+        "user_name": user["name"],
+        "batch_number": payload.get("batch_number"),
+        "total_batches": payload.get("total_batches"),
+        "subject": payload.get("subject"),
+        "email_count": payload.get("email_count"),
+        "open_count": 0,
+        "last_opened": None,
+        "created_at": datetime.utcnow(),
+    })
+    pixel_url = f"https://api.brainboxecomlab.com/track/open/{track_id}"
+    pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none" alt="" />'
+    return {"track_id": track_id, "pixel_url": pixel_url, "pixel_html": pixel_html}
+
+
+@app.get("/scout/tracks")
+async def get_my_tracks(user=Depends(require_approved)):
+    from auth import db
+    tracks = list(db["batch_tracks"].find(
+        {"user_id": str(user["_id"])}, {"_id": 0}
+    ).sort("created_at", -1).limit(50))
+    for t in tracks:
+        if t.get("created_at"): t["created_at"] = t["created_at"].isoformat()
+        if t.get("last_opened"): t["last_opened"] = t["last_opened"].isoformat()
+    return tracks
+
+
+@app.get("/admin/tracks")
+async def get_all_tracks(admin=Depends(require_admin)):
+    from auth import db
+    tracks = list(db["batch_tracks"].find({}, {"_id": 0}).sort("created_at", -1).limit(100))
+    for t in tracks:
+        if t.get("created_at"): t["created_at"] = t["created_at"].isoformat()
+        if t.get("last_opened"): t["last_opened"] = t["last_opened"].isoformat()
+    return tracks
 
 
 @app.get("/health")
