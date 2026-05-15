@@ -193,19 +193,45 @@ async def verify_bulk(background_tasks: BackgroundTasks, file: UploadFile = File
     contents = await file.read()
     try:
         df = pd.read_csv(io.BytesIO(contents))
-        raw = df.iloc[:, 0].dropna().tolist()
     except Exception:
         raise HTTPException(status_code=400, detail="Could not parse CSV.")
 
-    emails = []
-    for entry in raw:
-        entry = str(entry).strip()
-        parts = re.split(r"[;:|\s]+", entry)
-        for part in parts:
-            part = part.strip().lower()
-            if "@" in part and "." in part.split("@")[-1]:
-                emails.append(part)
+    # Smart email column detection
+    EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+    HEADER_RE = re.compile(r"mail|email|gmail|contact|recipient|address|receiver", re.IGNORECASE)
 
+    # Find best column by header name first
+    target_col = None
+    for col in df.columns:
+        if HEADER_RE.search(str(col)):
+            target_col = col
+            break
+
+    # If no header match, pick column with most email-like values
+    if target_col is None:
+        best_col, best_count = df.columns[0], 0
+        for col in df.columns:
+            count = df[col].dropna().astype(str).apply(lambda x: bool(EMAIL_RE.search(x))).sum()
+            if count > best_count:
+                best_count, best_col = count, col
+        target_col = best_col
+
+    # Collect all values from target column + scan other columns too
+    all_values = df[target_col].dropna().astype(str).tolist()
+    for col in df.columns:
+        if col != target_col:
+            for val in df[col].dropna().astype(str):
+                if EMAIL_RE.search(val):
+                    all_values.append(val)
+
+    # Extract emails from each cell
+    emails = []
+    for entry in all_values:
+        found = EMAIL_RE.findall(entry)
+        if found:
+            emails.extend([e.lower().strip() for e in found])
+
+    # Deduplicate
     seen = set()
     emails = [e for e in emails if not (e in seen or seen.add(e))]
 
@@ -327,10 +353,11 @@ async def get_scout_logs(admin=Depends(require_admin)):
 
 # ─── Email open tracking ──────────────────────────────────────────────────────
 
-@app.get("/track/open/{track_id}")
+@app.get("/pixel/{track_id}")
 async def track_open(track_id: str, request: Request):
     from auth import db
-    from fastapi import Request
+    from fastapi.responses import Response
+    import base64
     db["open_events"].insert_one({
         "track_id": track_id,
         "opened_at": datetime.utcnow(),
@@ -340,14 +367,18 @@ async def track_open(track_id: str, request: Request):
         {"track_id": track_id},
         {"$inc": {"open_count": 1}, "$set": {"last_opened": datetime.utcnow()}},
     )
-    # Return 1x1 transparent GIF
-    import base64
+    # 1x1 transparent GIF - smallest possible tracking pixel
     gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
-    from fastapi.responses import Response
-    return Response(content=gif, media_type="image/gif", headers={
-        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-        "Pragma": "no-cache",
-    })
+    return Response(
+        content=gif,
+        media_type="image/gif",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, private",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 
 @app.post("/scout/create-track")
@@ -367,8 +398,8 @@ async def create_track(payload: dict, user=Depends(require_approved)):
         "last_opened": None,
         "created_at": datetime.utcnow(),
     })
-    pixel_url = f"https://api.brainboxecomlab.com/track/open/{track_id}"
-    pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none" alt="" />'
+    pixel_url = f"https://api.brainboxecomlab.com/pixel/{track_id}"
+    pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="opacity:0;position:absolute;" alt="" />'
     return {"track_id": track_id, "pixel_url": pixel_url, "pixel_html": pixel_html}
 
 
