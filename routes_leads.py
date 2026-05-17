@@ -16,9 +16,12 @@ verifier = EmailVerifier()
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
-VALID_COUNTRIES = {"US", "GB", "CA", "AU"}
-COUNTRY_NAMES  = {"US": "United States", "GB": "United Kingdom", "CA": "Canada", "AU": "Australia"}
-COUNTRY_FLAGS  = {"US": "🇺🇸", "GB": "🇬🇧", "CA": "🇨🇦", "AU": "🇦🇺"}
+COUNTRY_META = {
+    "US": {"name": "United States", "flag": "🇺🇸"},
+    "GB": {"name": "United Kingdom", "flag": "🇬🇧"},
+    "CA": {"name": "Canada",         "flag": "🇨🇦"},
+    "AU": {"name": "Australia",      "flag": "🇦🇺"},
+}
 
 leads_col = db["leads"]
 lead_jobs  = {}
@@ -40,9 +43,9 @@ def extract_emails_from_cell(cell_value: str) -> list:
 
 @router.post("/admin/leads/upload/{country}")
 async def upload_leads(country: str, file: UploadFile = File(...), admin=Depends(require_admin)):
-    country = country.upper()
-    if country not in VALID_COUNTRIES:
-        raise HTTPException(400, detail=f"Country must be one of: {', '.join(VALID_COUNTRIES)}")
+    country = country.upper().strip()
+    if not country or len(country) > 10:
+        raise HTTPException(400, detail="Invalid country code")
     if not file.filename.endswith(".csv"):
         raise HTTPException(400, detail="Only .csv files accepted")
 
@@ -114,15 +117,18 @@ async def upload_leads(country: str, file: UploadFile = File(...), admin=Depends
 
 @router.get("/admin/leads/stats")
 async def leads_stats(admin=Depends(require_admin)):
+    # Get all distinct countries dynamically
+    countries = leads_col.distinct("country")
     stats = []
-    for country in VALID_COUNTRIES:
+    for country in sorted(countries):
         total     = leads_col.count_documents({"country": country})
         available = leads_col.count_documents({"country": country, "status": "available"})
         claimed   = leads_col.count_documents({"country": country, "status": "claimed"})
+        meta      = COUNTRY_META.get(country, {"name": country, "flag": "🌍"})
         stats.append({
             "country": country,
-            "name": COUNTRY_NAMES[country],
-            "flag": COUNTRY_FLAGS[country],
+            "name": meta["name"],
+            "flag": meta["flag"],
             "total": total,
             "available": available,
             "claimed": claimed,
@@ -130,19 +136,43 @@ async def leads_stats(admin=Depends(require_admin)):
     return stats
 
 
+@router.delete("/admin/leads/delete/{country}")
+async def delete_country_leads(country: str, admin=Depends(require_admin)):
+    country = country.upper()
+    result = leads_col.delete_many({"country": country})
+    return {"deleted": result.deleted_count, "country": country}
+
+
+@router.delete("/admin/leads/delete-available/{country}")
+async def delete_available_leads(country: str, admin=Depends(require_admin)):
+    country = country.upper()
+    result = leads_col.delete_many({"country": country, "status": "available"})
+    return {"deleted": result.deleted_count, "country": country}
+
+
+@router.get("/admin/leads/sample/{country}")
+async def get_sample_leads(country: str, admin=Depends(require_admin)):
+    country = country.upper()
+    docs = list(leads_col.find({"country": country}, {"_id": 0, "email": 1, "domain": 1, "status": 1}).limit(10))
+    return docs
+
+
 # ── User: Country overview ────────────────────────────────────────────────────
 
 @router.get("/leads/countries")
 async def get_countries(user=Depends(require_approved)):
+    countries_list = leads_col.distinct("country")
     countries = []
-    for country in VALID_COUNTRIES:
+    for country in countries_list:
         available = leads_col.count_documents({"country": country, "status": "available"})
-        countries.append({
-            "country": country,
-            "name": COUNTRY_NAMES[country],
-            "flag": COUNTRY_FLAGS[country],
-            "available": available,
-        })
+        if available > 0:
+            meta = COUNTRY_META.get(country, {"name": country, "flag": "🌍"})
+            countries.append({
+                "country": country,
+                "name": meta["name"],
+                "flag": meta["flag"],
+                "available": available,
+            })
     return sorted(countries, key=lambda x: x["available"], reverse=True)
 
 
@@ -155,8 +185,8 @@ class ClaimRequest(BaseModel):
 
 @router.post("/leads/claim-and-verify")
 async def claim_and_verify(payload: ClaimRequest, background_tasks: BackgroundTasks, user=Depends(require_approved)):
-    country = payload.country.upper()
-    if country not in VALID_COUNTRIES:
+    country = payload.country.upper().strip()
+    if not country:
         raise HTTPException(400, detail="Invalid country")
     if payload.amount < 100 or payload.amount > 2000:
         raise HTTPException(400, detail="Amount must be between 100 and 2000")
