@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header, Request
 from routes_dashboard import router as dashboard_router
+from routes_leads import router as leads_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
@@ -33,6 +34,7 @@ app.add_middleware(
 verifier = EmailVerifier()
 jobs = {}
 app.include_router(dashboard_router)
+app.include_router(leads_router)
 
 
 @app.on_event("startup")
