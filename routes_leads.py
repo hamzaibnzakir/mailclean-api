@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from auth import require_approved, require_admin, db, users_col
 from verifier import EmailVerifier
@@ -44,7 +44,13 @@ MAX_CLAIM_PER_USER_PER_DAY = 3000  # Daily limit per user
 
 
 def get_meta(country: str) -> dict:
-    return COUNTRY_META.get(country, {"name": country, "flag": "🌍"})
+    if country in COUNTRY_META:
+        return COUNTRY_META[country]
+    # For custom countries - store name in DB if provided, fallback to code
+    stored = db["country_meta"].find_one({"code": country})
+    if stored:
+        return {"name": stored.get("name", country), "flag": stored.get("flag", "")}
+    return {"name": country, "flag": ""}
 
 
 # ── Expire abandoned jobs ─────────────────────────────────────────────────────
@@ -73,12 +79,21 @@ def expire_abandoned_jobs():
 
 # ── Admin: Upload leads CSV ───────────────────────────────────────────────────
 @router.post("/admin/leads/upload/{country}")
-async def upload_leads(country: str, file: UploadFile = File(...), admin=Depends(require_admin)):
+async def upload_leads(country: str, request: Request, file: UploadFile = File(...), admin=Depends(require_admin)):
     country = country.upper().strip()
     if not country or len(country) > 10:
         raise HTTPException(400, detail="Invalid country code")
     if not file.filename.endswith(".csv"):
         raise HTTPException(400, detail="Only .csv files accepted")
+
+    # Save custom country meta if provided in query params
+    custom_name = request.query_params.get("name", "").strip()
+    if custom_name and country not in COUNTRY_META:
+        db["country_meta"].update_one(
+            {"code": country},
+            {"$set": {"code": country, "name": custom_name, "flag": ""}},
+            upsert=True
+        )
 
     contents = await file.read()
     try:
