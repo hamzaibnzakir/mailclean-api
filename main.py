@@ -34,9 +34,11 @@ jobs     = {}
 
 from routes_dashboard import router as dashboard_router
 from routes_leads      import router as leads_router
+from routes_gmail      import router as gmail_router
 
 app.include_router(dashboard_router)
 app.include_router(leads_router)
+app.include_router(gmail_router)
 
 
 @app.on_event("startup")
