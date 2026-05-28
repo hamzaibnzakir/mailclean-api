@@ -88,14 +88,14 @@ async def gmail_connect(user=Depends(require_approved)):
 @router.get("/auth/google/callback")
 async def gmail_callback(code: str = None, state: str = None, error: str = None):
     if error:
-        return RedirectResponse(f"{FRONTEND_URL}/app?gmail_error={error}")
+        return RedirectResponse(f"{FRONTEND_URL}/oauth-callback.html?gmail_error={error}")
     if not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}/app?gmail_error=missing_params")
+        return RedirectResponse(f"{FRONTEND_URL}/oauth-callback.html?gmail_error=missing_params")
 
     try:
         tokens = await exchange_code(code)
     except Exception:
-        return RedirectResponse(f"{FRONTEND_URL}/app?gmail_error=exchange_failed")
+        return RedirectResponse(f"{FRONTEND_URL}/oauth-callback.html?gmail_error=exchange_failed")
 
     user_id = state
     import httpx
@@ -110,12 +110,12 @@ async def gmail_callback(code: str = None, state: str = None, error: str = None)
         gmail_email = ""
 
     if not gmail_email:
-        return RedirectResponse(f"{FRONTEND_URL}/app?gmail_error=could_not_get_email")
+        return RedirectResponse(f"{FRONTEND_URL}/oauth-callback.html?gmail_error=could_not_get_email")
 
     # Block if connected to another user
     existing = db["gmail_tokens"].find_one({"gmail_email": gmail_email, "user_id": {"$ne": user_id}})
     if existing:
-        return RedirectResponse(f"{FRONTEND_URL}/app?gmail_error=account_already_connected")
+        return RedirectResponse(f"{FRONTEND_URL}/oauth-callback.html?gmail_error=account_already_connected")
 
     db["gmail_tokens"].update_one(
         {"user_id": user_id, "gmail_email": gmail_email},
@@ -133,7 +133,9 @@ async def gmail_callback(code: str = None, state: str = None, error: str = None)
         {"$addToSet": {"gmail_accounts": gmail_email}}
     )
     import urllib.parse
-    return RedirectResponse(f"{FRONTEND_URL}/app?gmail_connected=true&account={urllib.parse.quote(gmail_email)}")
+    # Store in a dedicated redirect page that saves to sessionStorage before routing
+    params = urllib.parse.urlencode({"gmail_connected": "true", "account": gmail_email})
+    return RedirectResponse(f"{FRONTEND_URL}/oauth-callback.html?{params}")
 
 
 @router.delete("/auth/google/disconnect/{gmail_email:path}")
